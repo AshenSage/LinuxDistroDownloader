@@ -39,7 +39,7 @@ A modern, user-friendly GUI application for downloading and verifying official L
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/AshenSage/LinuxDistroDownloader.git
-   cd LinuxDownloaderWithClaude
+   cd LinuxDistroDownloader
    ```
 
 2. **Install dependencies:**
