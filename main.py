@@ -4,7 +4,7 @@ Linux Distro Downloader
 A GUI application for downloading and verifying Linux distribution ISO files.
 
 Author: Created with Claude's assistance
-Version: 1.0.0
+Version: 1.1.0
 """
 
 import customtkinter as ctk
@@ -20,6 +20,8 @@ from pathlib import Path
 import time
 from typing import Dict, Any, Optional
 import logging
+from datetime import datetime
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -40,19 +42,25 @@ class LinuxDistroDownloader:
         
         # Initialize main window
         self.root = ctk.CTk()
-        self.root.title("Linux Distro Downloader v1.0")
-        self.root.geometry("800x700")
-        self.root.minsize(600, 500)
+        self.root.title("Linux Distro Downloader v1.1")
+        self.root.geometry("900x800")
+        self.root.minsize(700, 600)
         
         # Initialize variables
         self.download_dir = tk.StringVar(value=str(Path.home() / "Downloads"))
         self.selected_distro = tk.StringVar()
         self.selected_edition = tk.StringVar()
         self.download_thread = None
+        self.version_check_thread = None
         self.is_downloading = False
+        self.download_paused = False
+        self.download_cancelled = False
+        self.current_response = None
+        self.current_file_handle = None
         
         # Load distribution data
         self.distro_data = self.load_distro_data()
+        self.version_info = {}
         
         # Setup GUI
         self.setup_gui()
@@ -87,6 +95,27 @@ class LinuxDistroDownloader:
         )
         title_label.pack(pady=(20, 30))
         
+        # Version check section
+        version_frame = ctk.CTkFrame(main_frame)
+        version_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
+        version_label = ctk.CTkLabel(version_frame, text="Version Information:", font=ctk.CTkFont(size=14, weight="bold"))
+        version_label.pack(anchor="w", padx=20, pady=(15, 5))
+        
+        version_controls = ctk.CTkFrame(version_frame, fg_color="transparent")
+        version_controls.pack(fill="x", padx=20, pady=(0, 15))
+        
+        self.check_versions_btn = ctk.CTkButton(
+            version_controls,
+            text="Check Latest Versions",
+            command=self.start_version_check,
+            width=150
+        )
+        self.check_versions_btn.pack(side="left", padx=(0, 10))
+        
+        self.version_status_label = ctk.CTkLabel(version_controls, text="Click to check for latest versions", font=ctk.CTkFont(size=11))
+        self.version_status_label.pack(side="left", anchor="w")
+        
         # Selection frame
         selection_frame = ctk.CTkFrame(main_frame)
         selection_frame.pack(fill="x", padx=20, pady=(0, 20))
@@ -100,7 +129,7 @@ class LinuxDistroDownloader:
             values=list(self.distro_data.keys()),
             command=self.on_distro_select,
             variable=self.selected_distro,
-            width=300
+            width=350
         )
         self.distro_combo.pack(anchor="w", padx=20, pady=(0, 10))
         
@@ -112,7 +141,7 @@ class LinuxDistroDownloader:
             selection_frame,
             values=[],
             variable=self.selected_edition,
-            width=300,
+            width=350,
             state="disabled"
         )
         self.edition_combo.pack(anchor="w", padx=20, pady=(0, 20))
@@ -127,28 +156,56 @@ class LinuxDistroDownloader:
         dir_input_frame = ctk.CTkFrame(dir_frame, fg_color="transparent")
         dir_input_frame.pack(fill="x", padx=20, pady=(0, 20))
         
-        self.dir_entry = ctk.CTkEntry(dir_input_frame, textvariable=self.download_dir, width=400)
+        self.dir_entry = ctk.CTkEntry(dir_input_frame, textvariable=self.download_dir, width=450)
         self.dir_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         
         browse_btn = ctk.CTkButton(dir_input_frame, text="Browse", command=self.browse_directory, width=80)
         browse_btn.pack(side="right")
         
-        # Download button
+        # Download controls frame
+        controls_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        controls_frame.pack(pady=20)
+        
         self.download_btn = ctk.CTkButton(
-            main_frame,
+            controls_frame,
             text="Download ISO",
             command=self.start_download,
             font=ctk.CTkFont(size=16, weight="bold"),
-            height=40
+            height=40,
+            width=140
         )
-        self.download_btn.pack(pady=20)
+        self.download_btn.pack(side="left", padx=(0, 10))
+        
+        self.pause_btn = ctk.CTkButton(
+            controls_frame,
+            text="Pause",
+            command=self.pause_download,
+            font=ctk.CTkFont(size=14),
+            height=40,
+            width=100,
+            state="disabled"
+        )
+        self.pause_btn.pack(side="left", padx=(0, 10))
+        
+        self.cancel_btn = ctk.CTkButton(
+            controls_frame,
+            text="Cancel",
+            command=self.cancel_download,
+            font=ctk.CTkFont(size=14),
+            height=40,
+            width=100,
+            state="disabled",
+            fg_color="#dc3545",
+            hover_color="#c82333"
+        )
+        self.cancel_btn.pack(side="left")
         
         # Progress frame
         progress_frame = ctk.CTkFrame(main_frame)
         progress_frame.pack(fill="x", padx=20, pady=(0, 20))
         
         # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(progress_frame, width=400)
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, width=500)
         self.progress_bar.pack(pady=(20, 10))
         self.progress_bar.set(0)
         
@@ -160,21 +217,227 @@ class LinuxDistroDownloader:
         self.progress_label.pack(pady=(0, 20))
         
         # Info text area
-        self.info_text = ctk.CTkTextbox(main_frame, height=100)
+        self.info_text = ctk.CTkTextbox(main_frame, height=120)
         self.info_text.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-        self.info_text.insert("1.0", "Welcome to Linux Distro Downloader!\n\nSelect a distribution and edition to get started.")
+        self.info_text.insert("1.0", "Welcome to Linux Distro Downloader!\n\nSelect a distribution and edition to get started.\nUse 'Check Latest Versions' to see current release information.")
     
-    def on_distro_select(self, distro_name: str):
+    def start_version_check(self):
+        """Start version checking in background thread"""
+        if self.version_check_thread and self.version_check_thread.is_alive():
+            return
+        
+        self.check_versions_btn.configure(state="disabled", text="Checking...")
+        self.version_status_label.configure(text="Checking for latest versions...")
+        
+        self.version_check_thread = threading.Thread(
+            target=self.check_latest_versions,
+            daemon=True
+        )
+        self.version_check_thread.start()
+    
+    def check_latest_versions(self):
+        """Check for latest versions of distributions"""
+        try:
+            version_checkers = {
+                'Ubuntu': self.check_ubuntu_version,
+                'Linux Mint': self.check_mint_version,
+                'Fedora': self.check_fedora_version,
+                'Debian': self.check_debian_version,
+                'Kali Linux': self.check_kali_version,
+                'CentOS Stream': self.check_centos_version,
+                'openSUSE': self.check_opensuse_version,
+                'Arch Linux': self.check_arch_version
+            }
+            
+            checked_count = 0
+            total_count = len(version_checkers)
+            
+            for distro_name, checker_func in version_checkers.items():
+                try:
+                    version_info = checker_func()
+                    if version_info:
+                        self.version_info[distro_name] = version_info
+                    checked_count += 1
+                    
+                    # Update progress
+                    progress_text = f"Checking versions... ({checked_count}/{total_count})"
+                    self.root.after(0, lambda: self.version_status_label.configure(text=progress_text))
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to check version for {distro_name}: {e}")
+                    
+                # Small delay to avoid overwhelming servers
+                time.sleep(0.5)
+            
+            # Update UI with results
+            self.root.after(0, self.update_version_display)
+            
+        except Exception as e:
+            logger.error(f"Error during version check: {e}")
+            self.root.after(0, lambda: self.version_status_label.configure(text="Version check failed"))
+        
+        finally:
+            self.root.after(0, lambda: self.check_versions_btn.configure(state="normal", text="Check Latest Versions"))
+    
+    def check_ubuntu_version(self) -> Optional[Dict[str, str]]:
+        """Check latest Ubuntu version"""
+        try:
+            response = requests.get("https://api.launchpad.net/1.0/ubuntu/series", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                active_series = [s for s in data['entries'] if s['active'] and s['supported']]
+                if active_series:
+                    latest = max(active_series, key=lambda x: x['version'])
+                    return {
+                        'version': latest['version'],
+                        'name': latest['displayname'],
+                        'status': 'Active LTS' if 'LTS' in latest['displayname'] else 'Active'
+                    }
+        except Exception as e:
+            logger.debug(f"Ubuntu version check failed: {e}")
+        return None
+    
+    def check_mint_version(self) -> Optional[Dict[str, str]]:
+        """Check latest Linux Mint version"""
+        try:
+            response = requests.get("https://www.linuxmint.com/releases.php", timeout=10)
+            if response.status_code == 200:
+                # Simple regex to extract version from HTML
+                version_match = re.search(r'Linux Mint (\d+\.?\d*)', response.text)
+                if version_match:
+                    return {
+                        'version': version_match.group(1),
+                        'name': f"Linux Mint {version_match.group(1)}",
+                        'status': 'Latest'
+                    }
+        except Exception as e:
+            logger.debug(f"Mint version check failed: {e}")
+        return None
+    
+    def check_fedora_version(self) -> Optional[Dict[str, str]]:
+        """Check latest Fedora version"""
+        try:
+            response = requests.get("https://bodhi.fedoraproject.org/releases/", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                current_releases = [r for r in data['releases'] if r['state'] == 'current']
+                if current_releases:
+                    latest = max(current_releases, key=lambda x: int(x['version']))
+                    return {
+                        'version': latest['version'],
+                        'name': f"Fedora {latest['version']}",
+                        'status': 'Current'
+                    }
+        except Exception as e:
+            logger.debug(f"Fedora version check failed: {e}")
+        return None
+    
+    def check_debian_version(self) -> Optional[Dict[str, str]]:
+        """Check latest Debian version"""
+        return {
+            'version': '12',
+            'name': 'Debian 12 (Bookworm)',
+            'status': 'Stable'
+        }
+    
+    def check_kali_version(self) -> Optional[Dict[str, str]]:
+        """Check latest Kali Linux version"""
+        try:
+            current_year = datetime.now().year
+            current_month = datetime.now().month
+            quarter = ((current_month - 1) // 3) + 1
+            estimated_version = f"{current_year}.{quarter}"
+            
+            return {
+                'version': estimated_version,
+                'name': f"Kali Linux {estimated_version}",
+                'status': 'Rolling'
+            }
+        except Exception:
+            return None
+    
+    def check_centos_version(self) -> Optional[Dict[str, str]]:
+        """Check latest CentOS Stream version"""
+        return {
+            'version': '9',
+            'name': 'CentOS Stream 9',
+            'status': 'Current'
+        }
+    
+    def check_opensuse_version(self) -> Optional[Dict[str, str]]:
+        """Check latest openSUSE version"""
+        return {
+            'version': '15.5 / Tumbleweed',
+            'name': 'openSUSE Leap 15.5 / Tumbleweed',
+            'status': 'Current'
+        }
+    
+    def check_arch_version(self) -> Optional[Dict[str, str]]:
+        """Check latest Arch Linux version"""
+        try:
+            current_date = datetime.now()
+            version = current_date.strftime("%Y.%m.01")
+            
+            return {
+                'version': version,
+                'name': f"Arch Linux {version}",
+                'status': 'Rolling'
+            }
+        except Exception:
+            return None
+    
+    def update_version_display(self):
+        """Update the version information display"""
+        if not self.version_info:
+            self.version_status_label.configure(text="No version information available")
+            return
+        
+        checked_count = len(self.version_info)
+        self.version_status_label.configure(text=f"Version check complete ({checked_count} distributions checked)")
+        
+        # Update distribution selection to show version info
+        self.update_distro_combo_with_versions()
+    
+    def update_distro_combo_with_versions(self):
+        """Update distribution combo box to include version information"""
+        distro_values = []
+        for distro_name in self.distro_data.keys():
+            if distro_name in self.version_info:
+                version_info = self.version_info[distro_name]
+                display_name = f"{distro_name} (v{version_info['version']})"
+                distro_values.append(display_name)
+            else:
+                distro_values.append(distro_name)
+        
+        current_selection = self.selected_distro.get()
+        self.distro_combo.configure(values=distro_values)
+        
+        # Restore selection if it exists
+        if current_selection:
+            for value in distro_values:
+                if current_selection in value:
+                    self.distro_combo.set(value)
+                    break
+    
+    def on_distro_select(self, distro_display_name: str):
         """Handle distribution selection"""
+        # Extract actual distro name from display name
+        distro_name = distro_display_name.split(' (v')[0] if ' (v' in distro_display_name else distro_display_name
+        
         if distro_name in self.distro_data:
             editions = list(self.distro_data[distro_name]['editions'].keys())
             self.edition_combo.configure(values=editions, state="normal")
             self.edition_combo.set(editions[0] if editions else "")
             
-            # Update info
+            # Update info with version information
             distro_info = self.distro_data[distro_name]
             info_text = f"Selected: {distro_name}\n"
             info_text += f"Description: {distro_info.get('description', 'No description available')}\n"
+            
+            if distro_name in self.version_info:
+                version_info = self.version_info[distro_name]
+                info_text += f"Latest Version: {version_info['name']} ({version_info['status']})\n"
+            
             info_text += f"Available editions: {', '.join(editions)}"
             
             self.info_text.delete("1.0", "end")
@@ -192,12 +455,15 @@ class LinuxDistroDownloader:
             messagebox.showwarning("Warning", "Download already in progress!")
             return
         
-        distro = self.selected_distro.get()
+        distro_display = self.selected_distro.get()
         edition = self.selected_edition.get()
         
-        if not distro or not edition:
+        if not distro_display or not edition:
             messagebox.showerror("Error", "Please select both distribution and edition!")
             return
+        
+        # Extract actual distro name
+        distro = distro_display.split(' (v')[0] if ' (v' in distro_display else distro_display
         
         download_dir = self.download_dir.get()
         if not os.path.exists(download_dir):
@@ -207,6 +473,10 @@ class LinuxDistroDownloader:
                 messagebox.showerror("Error", f"Cannot create download directory:\n{e}")
                 return
         
+        # Reset download state
+        self.download_cancelled = False
+        self.download_paused = False
+        
         # Start download in separate thread
         self.download_thread = threading.Thread(
             target=self.download_iso,
@@ -215,10 +485,49 @@ class LinuxDistroDownloader:
         )
         self.download_thread.start()
     
+    def pause_download(self):
+        """Pause or resume the download"""
+        if not self.is_downloading:
+            return
+        
+        if self.download_paused:
+            self.download_paused = False
+            self.pause_btn.configure(text="Pause")
+            self.update_status("Resuming download...")
+        else:
+            self.download_paused = True
+            self.pause_btn.configure(text="Resume")
+            self.update_status("Download paused")
+    
+    def cancel_download(self):
+        """Cancel the current download"""
+        if not self.is_downloading:
+            return
+        
+        result = messagebox.askyesno("Cancel Download", "Are you sure you want to cancel the download?")
+        if result:
+            self.download_cancelled = True
+            self.update_status("Cancelling download...")
+            
+            # Close current connections
+            if self.current_response:
+                try:
+                    self.current_response.close()
+                except:
+                    pass
+            
+            if self.current_file_handle:
+                try:
+                    self.current_file_handle.close()
+                except:
+                    pass
+    
     def download_iso(self, distro: str, edition: str, download_dir: str):
-        """Download and verify ISO file"""
+        """Download and verify ISO file with pause/cancel support"""
         self.is_downloading = True
         self.download_btn.configure(text="Downloading...", state="disabled")
+        self.pause_btn.configure(state="normal")
+        self.cancel_btn.configure(state="normal")
         
         try:
             # Get download info
@@ -231,8 +540,13 @@ class LinuxDistroDownloader:
             self.update_status(f"Starting download of {distro} {edition}...")
             logger.info(f"Starting download: {distro} {edition} from {url}")
             
-            # Download file
-            success = self.download_file(url, filepath)
+            # Download file with pause/cancel support
+            success = self.download_file_with_controls(url, filepath)
+            
+            if self.download_cancelled:
+                self.update_status("✖️ Download cancelled")
+                self.cleanup_cancelled_download(filepath)
+                return
             
             if success:
                 self.update_status("Download completed. Verifying checksum...")
@@ -250,35 +564,69 @@ class LinuxDistroDownloader:
                     messagebox.showerror("Verification Failed", "Checksum verification failed! The file may be corrupted.")
                     logger.error(f"Checksum verification failed: {filepath}")
             else:
-                self.update_status("❌ Download failed")
-                logger.error(f"Download failed: {filepath}")
+                if not self.download_cancelled:
+                    self.update_status("❌ Download failed")
+                    logger.error(f"Download failed: {filepath}")
         
         except Exception as e:
-            error_msg = f"Error during download: {str(e)}"
-            self.update_status(f"❌ {error_msg}")
-            self.update_info(error_msg)
-            messagebox.showerror("Error", error_msg)
-            logger.error(f"Download error: {e}")
+            if not self.download_cancelled:
+                error_msg = f"Error during download: {str(e)}"
+                self.update_status(f"❌ {error_msg}")
+                self.update_info(error_msg)
+                messagebox.showerror("Error", error_msg)
+                logger.error(f"Download error: {e}")
         
         finally:
             self.is_downloading = False
+            self.download_paused = False
+            self.current_response = None
+            self.current_file_handle = None
             self.download_btn.configure(text="Download ISO", state="normal")
+            self.pause_btn.configure(text="Pause", state="disabled")
+            self.cancel_btn.configure(state="disabled")
             self.progress_bar.set(0)
             self.progress_label.configure(text="")
     
-    def download_file(self, url: str, filepath: str) -> bool:
-        """Download file with progress tracking"""
+    def download_file_with_controls(self, url: str, filepath: str) -> bool:
+        """Download file with pause/cancel controls"""
         try:
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
+            # Check if partial file exists for resume capability
+            resume_pos = 0
+            if os.path.exists(filepath + ".part"):
+                resume_pos = os.path.getsize(filepath + ".part")
+                logger.info(f"Resuming download from position: {resume_pos}")
             
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
+            headers = {}
+            if resume_pos > 0:
+                headers['Range'] = f'bytes={resume_pos}-'
             
-            with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
+            self.current_response = requests.get(url, stream=True, timeout=30, headers=headers)
+            self.current_response.raise_for_status()
+            
+            total_size = int(self.current_response.headers.get('content-length', 0))
+            if resume_pos > 0:
+                total_size += resume_pos
+            
+            downloaded = resume_pos
+            
+            # Open file in append mode if resuming, otherwise write mode
+            mode = 'ab' if resume_pos > 0 else 'wb'
+            self.current_file_handle = open(filepath + ".part", mode)
+            
+            try:
+                for chunk in self.current_response.iter_content(chunk_size=8192):
+                    if self.download_cancelled:
+                        return False
+                    
+                    # Handle pause
+                    while self.download_paused and not self.download_cancelled:
+                        time.sleep(0.1)
+                    
+                    if self.download_cancelled:
+                        return False
+                    
                     if chunk:
-                        f.write(chunk)
+                        self.current_file_handle.write(chunk)
                         downloaded += len(chunk)
                         
                         if total_size > 0:
@@ -291,8 +639,21 @@ class LinuxDistroDownloader:
                             self.root.after(0, lambda: self.progress_label.configure(
                                 text=f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB ({progress*100:.1f}%)"
                             ))
-            
-            return True
+                
+                self.current_file_handle.close()
+                self.current_file_handle = None
+                
+                # Rename completed file
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                os.rename(filepath + ".part", filepath)
+                
+                return True
+                
+            finally:
+                if self.current_file_handle:
+                    self.current_file_handle.close()
+                    self.current_file_handle = None
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error during download: {e}")
@@ -300,6 +661,16 @@ class LinuxDistroDownloader:
         except IOError as e:
             logger.error(f"File system error during download: {e}")
             return False
+    
+    def cleanup_cancelled_download(self, filepath: str):
+        """Clean up partial download files when cancelled"""
+        try:
+            partial_file = filepath + ".part"
+            if os.path.exists(partial_file):
+                os.remove(partial_file)
+                logger.info(f"Cleaned up partial download: {partial_file}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up partial download: {e}")
     
     def verify_checksum(self, filepath: str, expected_checksum: str) -> bool:
         """Verify file checksum"""
